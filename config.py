@@ -1,0 +1,159 @@
+import json
+import os
+import sys
+import winreg
+
+APP_NAME = "FlowAI"
+
+DEFAULTS = {
+    "hotkey": ["ctrl", "space"],
+    "device": None,
+    "model": "base",
+    "autostart": False,
+    "audio_cues": True,
+    "samplerate": 16000,
+}
+
+_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def config_dir():
+    base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Roaming")
+    path = os.path.join(base, APP_NAME)
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        pass
+    return path
+
+
+def config_path():
+    return os.path.join(config_dir(), "config.json")
+
+
+def set_autostart(enabled):
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE)
+    except OSError:
+        return False
+    try:
+        exe = sys.executable
+        if getattr(sys, "frozen", False):
+            command = '"%s"' % exe
+        else:
+            command = '"%s" "%s"' % (exe, os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py"))
+        if enabled:
+            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, command)
+        else:
+            try:
+                winreg.DeleteValue(key, APP_NAME)
+            except OSError:
+                pass
+        winreg.CloseKey(key)
+        return True
+    except OSError:
+        return False
+
+
+def autostart_enabled():
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_READ)
+    except OSError:
+        return False
+    try:
+        try:
+            winreg.QueryValueEx(key, APP_NAME)
+            return True
+        except OSError:
+            return False
+    finally:
+        winreg.CloseKey(key)
+
+
+class Config:
+    def __init__(self, path=None):
+        self.path = path or config_path()
+        self.data = dict(DEFAULTS)
+        self.load()
+
+    def load(self):
+        try:
+            if os.path.exists(self.path):
+                with open(self.path, "r", encoding="utf-8") as fh:
+                    stored = json.load(fh)
+                if isinstance(stored, dict):
+                    for key in DEFAULTS:
+                        if key in stored:
+                            self.data[key] = stored[key]
+        except (OSError, ValueError):
+            pass
+
+    def save(self):
+        try:
+            with open(self.path, "w", encoding="utf-8") as fh:
+                json.dump(self.data, fh, indent=2, ensure_ascii=False)
+        except OSError:
+            pass
+
+    @property
+    def hotkey(self):
+        value = self.data.get("hotkey")
+        if not isinstance(value, list) or len(value) != 2:
+            return list(DEFAULTS["hotkey"])
+        return [str(key) for key in value]
+
+    @hotkey.setter
+    def hotkey(self, value):
+        self.data["hotkey"] = [str(key) for key in value][:2]
+        self.save()
+
+    @property
+    def device(self):
+        return self.data.get("device")
+
+    @device.setter
+    def device(self, value):
+        self.data["device"] = (value or "").strip() or None
+        self.save()
+
+    @property
+    def samplerate(self):
+        return int(self.data.get("samplerate") or 16000)
+
+    @samplerate.setter
+    def samplerate(self, value):
+        self.data["samplerate"] = int(value)
+        self.save()
+
+    @property
+    def model(self):
+        value = str(self.data.get("model") or "base").lower()
+        allowed = ("tiny", "tiny.en", "base", "base.en", "small", "small.en",
+                   "medium", "medium.en", "large-v3", "large-v3-turbo", "distil-small.en",
+                   "distil-medium.en", "distil-large-v3")
+        if value not in allowed:
+            return "base"
+        return value
+
+    @model.setter
+    def model(self, value):
+        self.data["model"] = str(value or "base").lower()
+        self.save()
+
+    @property
+    def autostart(self):
+        return bool(self.data.get("autostart"))
+
+    @autostart.setter
+    def autostart(self, value):
+        self.data["autostart"] = bool(value)
+        self.save()
+
+    @property
+    def audio_cues(self):
+        return bool(self.data.get("audio_cues", True))
+
+    @audio_cues.setter
+    def audio_cues(self, value):
+        self.data["audio_cues"] = bool(value)
+        self.save()
