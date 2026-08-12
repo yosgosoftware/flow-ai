@@ -6,7 +6,7 @@ import sys
 import tempfile
 import urllib.request
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 REPO = "yosgosoftware/flow-ai"
 RELEASE_URL = "https://github.com/%s/releases/latest" % REPO
 API_URL = "https://api.github.com/repos/%s/releases/latest" % REPO
