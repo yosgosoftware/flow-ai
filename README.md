@@ -39,7 +39,7 @@ and no per-minute fees.
 FlowAI ships as a single portable `FlowAI.exe` — no installer, no dependencies to
 configure.
 
-1. **Download** the latest `FlowAI.exe` from the releases page.
+1. **Download** the latest `FlowAI.exe` from the [releases page](https://github.com/yosgosoftware/flow-ai/releases/latest).
 2. **Run** the file — that's it. A FlowAI icon appears in the system tray near the clock.
 3. When you open the dashboard for the first time, pick your preferred model size. The
    selected model downloads once in the background; your current model keeps working in
