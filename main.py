@@ -826,6 +826,7 @@ class ErrorBanner(QFrame):
 
 class DashboardTab(QWidget):
     toggle_changed = pyqtSignal(bool)
+    check_updates_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -932,7 +933,45 @@ class DashboardTab(QWidget):
         self._history_scroll.setWidget(self._history_container)
         history_layout.addWidget(self._history_scroll)
         root.addWidget(history_card)
+
+        updates_card = QFrame()
+        updates_card.setObjectName("Card")
+        updates_layout = QHBoxLayout(updates_card)
+        updates_layout.setContentsMargins(18, 16, 18, 16)
+        updates_layout.setSpacing(14)
+
+        updates_info = QVBoxLayout()
+        updates_info.setSpacing(2)
+        updates_title = QLabel("Updates")
+        updates_title.setObjectName("SectionTitle")
+        self._version_label = QLabel("Version v%s" % updater.APP_VERSION)
+        self._version_label.setObjectName("StatusText")
+        self._update_note = QLabel("Checks for new releases on startup")
+        self._update_note.setObjectName("Hint")
+        updates_info.addWidget(updates_title)
+        updates_info.addWidget(self._version_label)
+        updates_info.addWidget(self._update_note)
+        updates_layout.addLayout(updates_info)
+        updates_layout.addStretch(1)
+
+        self._update_btn = QPushButton("Check for Updates")
+        self._update_btn.setObjectName("PrimaryButton")
+        self._update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._update_btn.clicked.connect(self.check_updates_requested)
+        updates_layout.addWidget(self._update_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        root.addWidget(updates_card)
         root.addStretch(1)
+
+    def set_version(self, version):
+        self._version_label.setText("Version v%s" % version)
+
+    def set_update_note(self, text):
+        self._update_note.setText(text)
+
+    def set_updates_checking(self, active):
+        self._update_btn.setEnabled(not active)
+        self._update_btn.setText("Checking\u2026" if active else "Check for Updates")
 
     def set_history(self, entries):
         self._history = [entry for entry in list(entries) if entry.get("text")][:50]
@@ -1554,6 +1593,15 @@ class MainWindow(QWidget):
     def set_history(self, entries):
         self.dashboard.set_history(entries)
 
+    def set_version(self, version):
+        self.dashboard.set_version(version)
+
+    def set_update_note(self, text):
+        self.dashboard.set_update_note(text)
+
+    def set_updates_checking(self, active):
+        self.dashboard.set_updates_checking(active)
+
     def add_history_entry(self, entry):
         self.dashboard.add_history_entry(entry)
 
@@ -1608,6 +1656,7 @@ class FlowAIApplication:
         self._update_downloading = False
         self._cancel_download = False
         self._manual_check = False
+        self._update_phase = "check"
 
         self._setup_logging()
         sys.excepthook = self._excepthook
@@ -1657,6 +1706,7 @@ class FlowAIApplication:
         self.window.model_tab.set_selection(self.config.model)
         self.window.audio_tab.refresh_devices()
         self.window.audio_tab.set_cues(self.config.audio_cues)
+        self.window.set_version(updater.APP_VERSION)
         self.window.show()
         QTimer.singleShot(300, self._open_window)
         QTimer.singleShot(10000, lambda: self._check_for_updates(False))
@@ -1739,6 +1789,9 @@ class FlowAIApplication:
         self.window.close_requested.connect(self._hide_to_tray)
         self.window.minimize_requested.connect(self._hide_to_tray)
         self.window.dashboard.toggle_changed.connect(self.set_service)
+        self.window.dashboard.check_updates_requested.connect(
+            lambda: self._check_for_updates(True)
+        )
         self.window.hotkeys_tab.record_requested.connect(self._record_requested)
         self.window.hotkeys_tab.reset_requested.connect(self._reset_hotkey)
         self.window.audio_tab.error_raised.connect(self.window.show_error)
@@ -1809,6 +1862,9 @@ class FlowAIApplication:
             return
         self._update_checking = True
         self._manual_check = manual
+        self._update_phase = "check"
+        self.window.set_updates_checking(True)
+        self.window.set_update_note("Checking for updates\u2026")
 
         def work():
             try:
@@ -1828,6 +1884,8 @@ class FlowAIApplication:
         threading.Thread(target=work, daemon=True, name="FlowAI-Updater").start()
 
     def _on_update_not_available(self):
+        self.window.set_updates_checking(False)
+        self.window.set_update_note("You're up to date.")
         if self._manual_check:
             self.tray.showMessage(
                 "FlowAI",
@@ -1837,6 +1895,11 @@ class FlowAIApplication:
             )
 
     def _on_update_failed(self, message):
+        self.window.set_updates_checking(False)
+        if self._update_phase == "download":
+            self.window.set_update_note("Download failed.")
+        else:
+            self.window.set_update_note("Couldn\u2019t check for updates.")
         if self._manual_check:
             self.tray.showMessage(
                 "FlowAI",
@@ -1846,6 +1909,8 @@ class FlowAIApplication:
             )
 
     def _on_update_available(self, version, download_url, release_url):
+        self.window.set_updates_checking(False)
+        self.window.set_update_note("Update v%s is available." % version)
         self._open_window()
         dialog = QDialog(self.window)
         dialog.setWindowTitle("FlowAI Update")
@@ -1900,6 +1965,9 @@ class FlowAIApplication:
             return
         self._update_downloading = True
         self._cancel_download = False
+        self._update_phase = "download"
+        self.window.set_updates_checking(True)
+        self.window.set_update_note("Downloading update v%s\u2026" % version)
 
         dialog = QDialog(self.window)
         dialog.setWindowTitle("FlowAI Update")
@@ -1947,6 +2015,8 @@ class FlowAIApplication:
         threading.Thread(target=work, daemon=True, name="FlowAI-Download").start()
 
     def _on_update_downloaded(self, new_exe):
+        self.window.set_updates_checking(False)
+        self.window.set_update_note("Update ready \u2014 restart to install.")
         if not getattr(sys, "frozen", False):
             subprocess.Popen(["explorer", "/select," + os.path.normpath(new_exe)])
             return
