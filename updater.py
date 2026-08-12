@@ -6,7 +6,7 @@ import sys
 import tempfile
 import urllib.request
 
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 REPO = "yosgosoftware/flow-ai"
 RELEASE_URL = "https://github.com/%s/releases/latest" % REPO
 API_URL = "https://api.github.com/repos/%s/releases/latest" % REPO
@@ -61,25 +61,65 @@ def fetch_latest():
     }
 
 
+def _try_remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def download_exe(url, dest_dir, cancel=None):
-    """Stream the update exe into dest_dir and return the final path."""
+    """Stream the update exe into dest_dir and return the final path.
+
+    Validates the download (Content-Length + Windows PE header) so a
+    truncated or bogus file never gets installed.
+    """
     os.makedirs(dest_dir, exist_ok=True)
     destination = os.path.join(dest_dir, "FlowAI_update.exe")
     partial = destination + ".part"
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=120) as response, open(partial, "wb") as out:
-        while True:
-            if cancel and cancel():
-                out.close()
-                try:
-                    os.remove(partial)
-                except OSError:
-                    pass
-                raise UpdateError("Update download cancelled.")
-            chunk = response.read(65536)
-            if not chunk:
-                break
-            out.write(chunk)
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            status = getattr(response, "status", 200)
+            if status != 200:
+                raise UpdateError("Download failed (HTTP %s)." % status)
+            content_length = response.headers.get("Content-Length")
+            try:
+                expected = int(content_length) if content_length is not None else None
+            except ValueError:
+                expected = None
+            with open(partial, "wb") as out:
+                while True:
+                    if cancel and cancel():
+                        out.close()
+                        _try_remove(partial)
+                        raise UpdateError("Update download cancelled.")
+                    chunk = response.read(65536)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+    except UpdateError:
+        raise
+    except Exception as exc:
+        _try_remove(partial)
+        raise UpdateError("Download failed: %s" % exc) from exc
+
+    try:
+        size = os.path.getsize(partial)
+    except OSError as exc:
+        _try_remove(partial)
+        raise UpdateError("Download failed: %s" % exc) from exc
+    if expected is not None and size != expected:
+        _try_remove(partial)
+        raise UpdateError("Download failed: file was truncated.")
+    if size < 1024 * 1024:
+        _try_remove(partial)
+        raise UpdateError("Download failed: file is not a valid installer.")
+    with open(partial, "rb") as fh:
+        header = fh.read(2)
+    if header != b"MZ":
+        _try_remove(partial)
+        raise UpdateError("Download failed: file is not a valid installer.")
     os.replace(partial, destination)
     return destination
 

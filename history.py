@@ -42,6 +42,26 @@ class HistoryStore:
             self._save_locked()
         return entry
 
+    def delete(self, entry):
+        ts = entry.get("ts")
+        text = entry.get("text")
+        removed = False
+        with self._lock:
+            keep = []
+            for existing in self._entries:
+                if not removed:
+                    if ts is not None and existing.get("ts") == ts:
+                        removed = True
+                        continue
+                    if ts is None and existing.get("text") == text:
+                        removed = True
+                        continue
+                keep.append(existing)
+            if removed:
+                self._entries = keep
+                self._save_locked()
+        return removed
+
     def clear(self):
         with self._lock:
             self._entries = []

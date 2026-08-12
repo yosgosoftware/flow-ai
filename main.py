@@ -36,6 +36,7 @@ class Signals(QObject):
     hotkey_captured = pyqtSignal(list)
     capture_state_changed = pyqtSignal(bool)
     history_added = pyqtSignal(dict)
+    history_deleted = pyqtSignal(dict)
     model_ready = pyqtSignal(str)
     model_error = pyqtSignal(str, str)
     update_available = pyqtSignal(str, str, str)
@@ -57,6 +58,9 @@ class Signals(QObject):
 
     def on_history_added(self, entry):
         self.history_added.emit(entry)
+
+    def on_history_deleted(self, entry):
+        self.history_deleted.emit(entry)
 
     def on_model_ready(self, size):
         self.model_ready.emit(size)
@@ -259,6 +263,18 @@ QPushButton#GhostButton {
 
 QPushButton#GhostButton:hover {
     background: #1F1F24;
+}
+
+QPushButton#DangerButton {
+    background: transparent;
+    border: 1px solid #3A262A;
+    color: #E5A0A0;
+}
+
+QPushButton#DangerButton:hover {
+    background: rgba(229, 72, 77, 0.18);
+    border: 1px solid #E5484D;
+    color: #FF9A9A;
 }
 
 QToolButton#WindowBtn {
@@ -827,6 +843,7 @@ class ErrorBanner(QFrame):
 class DashboardTab(QWidget):
     toggle_changed = pyqtSignal(bool)
     check_updates_requested = pyqtSignal()
+    history_delete_requested = pyqtSignal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1020,7 +1037,27 @@ class DashboardTab(QWidget):
             lambda _checked=False, t=text: self._copy_history(t)
         )
         row.addWidget(copy_btn, 0, Qt.AlignmentFlag.AlignTop)
+        delete_btn = QPushButton("Delete")
+        delete_btn.setObjectName("DangerButton")
+        delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        delete_btn.clicked.connect(
+            lambda _checked=False, e=entry: self.history_delete_requested.emit(e)
+        )
+        row.addWidget(delete_btn, 0, Qt.AlignmentFlag.AlignTop)
         return item
+
+    def remove_history_entry(self, entry):
+        ts = entry.get("ts")
+        text = entry.get("text")
+        self._history = [
+            e
+            for e in self._history
+            if not (
+                (ts is not None and e.get("ts") == ts)
+                or (ts is None and e.get("text") == text)
+            )
+        ]
+        self._rebuild_history()
 
     def _copy_history(self, text):
         try:
@@ -1605,6 +1642,9 @@ class MainWindow(QWidget):
     def add_history_entry(self, entry):
         self.dashboard.add_history_entry(entry)
 
+    def delete_history_entry(self, entry):
+        self.dashboard.remove_history_entry(entry)
+
     def show_error(self, message):
         self.dashboard.show_error(message)
 
@@ -1783,6 +1823,8 @@ class FlowAIApplication:
         self.signals.transcription_error.connect(self.window.show_error)
         self.signals.transcription_error.connect(self.cues.on_error)
         self.signals.history_added.connect(self.window.add_history_entry)
+        self.window.dashboard.history_delete_requested.connect(self._delete_history)
+        self.signals.history_deleted.connect(self.window.delete_history_entry)
         self.signals.hotkey_captured.connect(self._on_hotkey_captured)
         self.signals.capture_state_changed.connect(self.window.set_capture_state)
 
@@ -1811,6 +1853,10 @@ class FlowAIApplication:
         entry = self.history.add(text)
         if entry:
             self.signals.on_history_added(entry)
+
+    def _delete_history(self, entry):
+        if self.history.delete(entry):
+            self.signals.on_history_deleted(entry)
 
     def _on_hotkey_captured(self, combo):
         self.window.hotkeys_tab.set_combo(combo)
@@ -1951,6 +1997,15 @@ class FlowAIApplication:
         buttons.addWidget(later_btn)
         root.addLayout(buttons)
 
+        if not download_url:
+            install_btn.setEnabled(False)
+            install_btn.setText("Installer Unavailable")
+            body.setText(
+                "FlowAI v%s is now available. You're running v%s.\n\n"
+                "This release has no bundled installer, so open the release "
+                "page to download it."
+                % (version, updater.APP_VERSION)
+            )
         install_btn.clicked.connect(
             lambda: self._download_update(download_url, version)
         )
