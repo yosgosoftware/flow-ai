@@ -1,8 +1,12 @@
 import ctypes
 import logging
 import os
+import subprocess
 import sys
+import tempfile
+import threading
 import traceback
+import webbrowser
 
 from PyQt6.QtCore import QObject, QSharedMemory, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (QBrush, QColor, QFont, QIcon, QLinearGradient,
@@ -10,7 +14,7 @@ from PyQt6.QtGui import (QBrush, QColor, QFont, QIcon, QLinearGradient,
 from PyQt6.QtCore import QPointF, QRectF
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
-                             QFrame, QGraphicsDropShadowEffect, QHBoxLayout,
+                             QDialog, QFrame, QGraphicsDropShadowEffect, QHBoxLayout,
                              QLabel, QLineEdit, QMenu, QMessageBox,
                              QPushButton, QScrollArea, QStackedWidget,
                              QSystemTrayIcon, QToolButton, QVBoxLayout, QWidget)
@@ -18,6 +22,7 @@ from PyQt6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
 import pyperclip
 
 import config as config_mod
+import updater
 from audio_cues import AudioCues
 from audio_engine import AudioEngine
 from history import HistoryStore
@@ -33,6 +38,10 @@ class Signals(QObject):
     history_added = pyqtSignal(dict)
     model_ready = pyqtSignal(str)
     model_error = pyqtSignal(str, str)
+    update_available = pyqtSignal(str, str, str)
+    update_not_available = pyqtSignal()
+    update_failed = pyqtSignal(str)
+    update_downloaded = pyqtSignal(str)
 
     def on_status_changed(self, state):
         self.status_changed.emit(state)
@@ -54,6 +63,18 @@ class Signals(QObject):
 
     def on_model_error(self, size, message):
         self.model_error.emit(size, message)
+
+    def on_update_available(self, version, download_url, release_url):
+        self.update_available.emit(version, download_url, release_url)
+
+    def on_update_not_available(self):
+        self.update_not_available.emit()
+
+    def on_update_failed(self, message):
+        self.update_failed.emit(message)
+
+    def on_update_downloaded(self, new_exe):
+        self.update_downloaded.emit(new_exe)
 
     def on_capture_state_changed(self, active):
         self.capture_state_changed.emit(active)
@@ -1508,7 +1529,7 @@ class MainWindow(QWidget):
 
         layout.addStretch(1)
 
-        version = QLabel("v1.0.0")
+        version = QLabel("v%s" % updater.APP_VERSION)
         version.setObjectName("Hint")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(version)
@@ -1547,7 +1568,7 @@ class MainWindow(QWidget):
 
 
 class TrayIcon(QSystemTrayIcon):
-    def __init__(self, icon, on_open, on_toggle, on_quit):
+    def __init__(self, icon, on_open, on_toggle, on_quit, on_check_updates):
         super().__init__(icon)
         self._on_open = on_open
         self._on_toggle = on_toggle
@@ -1558,6 +1579,9 @@ class TrayIcon(QSystemTrayIcon):
         self._open_action.triggered.connect(self._on_open)
         self._toggle_action = menu.addAction("Suspend Hotkeys")
         self._toggle_action.triggered.connect(self._on_toggle)
+        menu.addSeparator()
+        check_action = menu.addAction("Check for Updates\u2026")
+        check_action.triggered.connect(on_check_updates)
         menu.addSeparator()
         quit_action = menu.addAction("Quit")
         quit_action.triggered.connect(self._on_quit)
@@ -1580,6 +1604,10 @@ class FlowAIApplication:
         self._tray_notified = False
         self._ipc_server = None
         self._app_hwnd = 0
+        self._update_checking = False
+        self._update_downloading = False
+        self._cancel_download = False
+        self._manual_check = False
 
         self._setup_logging()
         sys.excepthook = self._excepthook
@@ -1610,6 +1638,7 @@ class FlowAIApplication:
             on_open=self._open_window,
             on_toggle=self._toggle_service,
             on_quit=self.quit_app,
+            on_check_updates=lambda: self._check_for_updates(True),
         )
 
     def run(self):
@@ -1630,6 +1659,7 @@ class FlowAIApplication:
         self.window.audio_tab.set_cues(self.config.audio_cues)
         self.window.show()
         QTimer.singleShot(300, self._open_window)
+        QTimer.singleShot(10000, lambda: self._check_for_updates(False))
         self._start_ipc_server()
         self.app.aboutToQuit.connect(self.quit_app)
 
@@ -1717,6 +1747,10 @@ class FlowAIApplication:
         self.window.model_tab.model_changed.connect(self._set_model)
         self.signals.model_ready.connect(self._on_model_ready)
         self.signals.model_error.connect(self._on_model_error)
+        self.signals.update_available.connect(self._on_update_available)
+        self.signals.update_not_available.connect(self._on_update_not_available)
+        self.signals.update_failed.connect(self._on_update_failed)
+        self.signals.update_downloaded.connect(self._on_update_downloaded)
 
     def _on_transcribed(self, text, hwnd):
         words = [w for w in text.split() if w.strip()]
@@ -1767,6 +1801,203 @@ class FlowAIApplication:
     def _on_model_error(self, size, message):
         self.window.model_tab.set_model_failed(size, self.config.model)
         self.window.show_error("Could not load the '%s' model: %s" % (size, message))
+
+    # --- updates ---------------------------------------------------------
+
+    def _check_for_updates(self, manual):
+        if self._update_checking:
+            return
+        self._update_checking = True
+        self._manual_check = manual
+
+        def work():
+            try:
+                info = updater.fetch_latest()
+            except updater.UpdateError as exc:
+                self.signals.on_update_failed(str(exc))
+            else:
+                if updater.is_newer(info["version"], updater.APP_VERSION):
+                    self.signals.on_update_available(
+                        info["version"], info["download_url"], info["release_url"]
+                    )
+                else:
+                    self.signals.on_update_not_available()
+            finally:
+                self._update_checking = False
+
+        threading.Thread(target=work, daemon=True, name="FlowAI-Updater").start()
+
+    def _on_update_not_available(self):
+        if self._manual_check:
+            self.tray.showMessage(
+                "FlowAI",
+                "You're running the latest version (v%s)." % updater.APP_VERSION,
+                QSystemTrayIcon.MessageIcon.Information,
+                3000,
+            )
+
+    def _on_update_failed(self, message):
+        if self._manual_check:
+            self.tray.showMessage(
+                "FlowAI",
+                "Could not check for updates: %s" % message,
+                QSystemTrayIcon.MessageIcon.Warning,
+                4000,
+            )
+
+    def _on_update_available(self, version, download_url, release_url):
+        self._open_window()
+        dialog = QDialog(self.window)
+        dialog.setWindowTitle("FlowAI Update")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(380)
+        dialog.setStyleSheet(
+            "background: #16161A; color: #ECECEF;"
+            " font-size: 13px;"
+        )
+        root = QVBoxLayout(dialog)
+        root.setContentsMargins(22, 20, 22, 20)
+        root.setSpacing(14)
+
+        title = QLabel("Update available")
+        title.setStyleSheet("font-size: 17px; font-weight: 700;")
+        root.addWidget(title)
+
+        body = QLabel(
+            "FlowAI v%s is now available. You're running v%s.\n\n"
+            "You can download the new version and let FlowAI install "
+            "it automatically, or take a look at the release page first."
+            % (version, updater.APP_VERSION)
+        )
+        body.setObjectName("Hint")
+        body.setWordWrap(True)
+        root.addWidget(body)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(10)
+        install_btn = QPushButton("Download & Install")
+        install_btn.setObjectName("PrimaryButton")
+        page_btn = QPushButton("Open Release Page")
+        page_btn.setObjectName("GhostButton")
+        later_btn = QPushButton("Later")
+        later_btn.setObjectName("GhostButton")
+        buttons.addWidget(install_btn)
+        buttons.addWidget(page_btn)
+        buttons.addWidget(later_btn)
+        root.addLayout(buttons)
+
+        install_btn.clicked.connect(
+            lambda: self._download_update(download_url, version)
+        )
+        page_btn.clicked.connect(
+            lambda: (webbrowser.open(release_url), dialog.accept())
+        )
+        later_btn.clicked.connect(dialog.accept)
+        dialog.exec()
+
+    def _download_update(self, download_url, version):
+        if self._update_downloading:
+            return
+        self._update_downloading = True
+        self._cancel_download = False
+
+        dialog = QDialog(self.window)
+        dialog.setWindowTitle("FlowAI Update")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(360)
+        dialog.setStyleSheet("background: #16161A; color: #ECECEF; font-size: 13px;")
+        root = QVBoxLayout(dialog)
+        root.setContentsMargins(22, 20, 22, 20)
+        root.setSpacing(14)
+
+        status = QLabel("Downloading FlowAI v%s\u2026" % version)
+        status.setStyleSheet("font-size: 15px; font-weight: 600;")
+        root.addWidget(status)
+
+        detail = QLabel(
+            "This happens in the background and won't interrupt your dictation. "
+            "The new version will be applied when the download finishes."
+        )
+        detail.setObjectName("Hint")
+        detail.setWordWrap(True)
+        root.addWidget(detail)
+
+        cancel_btn = QPushButton("Cancel Download")
+        cancel_btn.setObjectName("GhostButton")
+        root.addWidget(cancel_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        cancel_btn.clicked.connect(lambda: setattr(self, "_cancel_download", True))
+        dialog.show()
+        self.signals.update_downloaded.connect(dialog.accept)
+        self.signals.update_failed.connect(lambda _message: dialog.accept())
+
+        def work():
+            try:
+                dest_dir = os.path.join(tempfile.gettempdir(), "FlowAI_update")
+                new_exe = updater.download_exe(
+                    download_url, dest_dir, cancel=lambda: self._cancel_download
+                )
+                self.signals.on_update_downloaded(new_exe)
+            except updater.UpdateError as exc:
+                self.signals.on_update_failed(str(exc))
+            except Exception as exc:
+                self.signals.on_update_failed("Download failed: %s" % exc)
+            finally:
+                self._update_downloading = False
+
+        threading.Thread(target=work, daemon=True, name="FlowAI-Download").start()
+
+    def _on_update_downloaded(self, new_exe):
+        if not getattr(sys, "frozen", False):
+            subprocess.Popen(["explorer", "/select," + os.path.normpath(new_exe)])
+            return
+
+        dialog = QDialog(self.window)
+        dialog.setWindowTitle("FlowAI Update")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(380)
+        dialog.setStyleSheet("background: #16161A; color: #ECECEF; font-size: 13px;")
+        root = QVBoxLayout(dialog)
+        root.setContentsMargins(22, 20, 22, 20)
+        root.setSpacing(14)
+
+        title = QLabel("Ready to install")
+        title.setStyleSheet("font-size: 17px; font-weight: 700;")
+        root.addWidget(title)
+
+        body = QLabel(
+            "The update has been downloaded. FlowAI will now restart "
+            "automatically to finish installing the new version."
+        )
+        body.setObjectName("Hint")
+        body.setWordWrap(True)
+        root.addWidget(body)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(10)
+        restart_btn = QPushButton("Restart & Update")
+        restart_btn.setObjectName("PrimaryButton")
+        not_now_btn = QPushButton("Not Now")
+        not_now_btn.setObjectName("GhostButton")
+        buttons.addWidget(restart_btn)
+        buttons.addWidget(not_now_btn)
+        root.addLayout(buttons)
+
+        def apply():
+            dialog.accept()
+            try:
+                updater.apply_update(new_exe, sys.executable)
+            except updater.UpdateError as exc:
+                self.tray.showMessage(
+                    "FlowAI", "Could not install the update: %s" % exc,
+                    QSystemTrayIcon.MessageIcon.Warning, 4000
+                )
+                webbrowser.open(updater.RELEASE_URL)
+                return
+            self.quit_app()
+
+        restart_btn.clicked.connect(apply)
+        not_now_btn.clicked.connect(dialog.accept)
+        dialog.exec()
 
     def set_service(self, enabled):
         self.manager.set_service(enabled)
