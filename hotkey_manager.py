@@ -231,6 +231,37 @@ class INPUT(ctypes.Structure):
     ]
 
 
+KEY_EVENT = 0x0001
+GENERIC_READ = 0x80000000
+GENERIC_WRITE = 0x40000000
+FILE_SHARE_READ = 0x00000001
+FILE_SHARE_WRITE = 0x00000002
+OPEN_EXISTING = 3
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+
+class KEY_EVENT_RECORD(ctypes.Structure):
+    _fields_ = [
+        ("bKeyDown", ctypes.wintypes.BOOL),
+        ("wRepeatCount", ctypes.wintypes.WORD),
+        ("wVirtualKeyCode", ctypes.wintypes.WORD),
+        ("wVirtualScanCode", ctypes.wintypes.WORD),
+        ("uChar", ctypes.wintypes.WCHAR),
+        ("dwControlKeyState", ctypes.wintypes.DWORD),
+    ]
+
+
+class INPUT_RECORD_UNION(ctypes.Union):
+    _fields_ = [("KeyEvent", KEY_EVENT_RECORD)]
+
+
+class INPUT_RECORD(ctypes.Structure):
+    _fields_ = [
+        ("EventType", ctypes.wintypes.WORD),
+        ("Event", INPUT_RECORD_UNION),
+    ]
+
+
 LOWLEVEL_KEYBOARD_PROC = ctypes.WINFUNCTYPE(
     ctypes.c_long, ctypes.c_int, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM
 )
@@ -306,6 +337,29 @@ _kernel32.GetCurrentThreadId.argtypes = []
 _kernel32.GetCurrentThreadId.restype = ctypes.wintypes.DWORD
 _kernel32.GetModuleHandleW.argtypes = [ctypes.wintypes.LPCWSTR]
 _kernel32.GetModuleHandleW.restype = ctypes.wintypes.HMODULE
+_kernel32.AttachConsole.argtypes = [ctypes.wintypes.DWORD]
+_kernel32.AttachConsole.restype = ctypes.wintypes.BOOL
+_kernel32.FreeConsole.argtypes = []
+_kernel32.FreeConsole.restype = ctypes.wintypes.BOOL
+_kernel32.CreateFileW.argtypes = [
+    ctypes.wintypes.LPCWSTR,
+    ctypes.wintypes.DWORD,
+    ctypes.wintypes.DWORD,
+    ctypes.c_void_p,
+    ctypes.wintypes.DWORD,
+    ctypes.wintypes.DWORD,
+    ctypes.wintypes.HANDLE,
+]
+_kernel32.CreateFileW.restype = ctypes.wintypes.HANDLE
+_kernel32.WriteConsoleInputW.argtypes = [
+    ctypes.wintypes.HANDLE,
+    ctypes.POINTER(INPUT_RECORD),
+    ctypes.wintypes.DWORD,
+    ctypes.POINTER(ctypes.wintypes.DWORD),
+]
+_kernel32.WriteConsoleInputW.restype = ctypes.wintypes.BOOL
+_kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+_kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
 _user32.GetMessageW.argtypes = [
     ctypes.POINTER(MSG),
     ctypes.wintypes.HWND,
@@ -441,8 +495,81 @@ def activate_window(hwnd):
         return False
 
 
+def _write_console_input(pid, text):
+    """Inject text straight into another process's console input buffer.
+
+    Terminal apps like OpenCode run the console in raw/VT input mode, where a
+    Ctrl+V paste is delivered to the app as a literal ^V key event instead of
+    pasting. Writing the text as console input records works regardless of the
+    console's input mode. Returns True when the text was queued.
+    """
+    if not pid:
+        return False
+    attached = bool(_kernel32.AttachConsole(pid))
+    if not attached:
+        _kernel32.FreeConsole()
+        attached = bool(_kernel32.AttachConsole(pid))
+    if not attached:
+        return False
+    try:
+        conin = _kernel32.CreateFileW(
+            "CONIN$",
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            0,
+            None,
+        )
+        if not conin or conin == INVALID_HANDLE_VALUE:
+            return False
+        text = text.replace("\r", " ").replace("\n", " ")
+        records = (INPUT_RECORD * (len(text) * 2))()
+        for i, char in enumerate(text):
+            records[2 * i].EventType = KEY_EVENT
+            records[2 * i].Event.KeyEvent.bKeyDown = True
+            records[2 * i].Event.KeyEvent.wRepeatCount = 1
+            records[2 * i].Event.KeyEvent.wVirtualKeyCode = 0
+            records[2 * i].Event.KeyEvent.wVirtualScanCode = 0
+            records[2 * i].Event.KeyEvent.uChar = char
+            records[2 * i].Event.KeyEvent.dwControlKeyState = 0
+            records[2 * i + 1].EventType = KEY_EVENT
+            records[2 * i + 1].Event.KeyEvent.bKeyDown = False
+            records[2 * i + 1].Event.KeyEvent.wRepeatCount = 1
+            records[2 * i + 1].Event.KeyEvent.wVirtualKeyCode = 0
+            records[2 * i + 1].Event.KeyEvent.wVirtualScanCode = 0
+            records[2 * i + 1].Event.KeyEvent.uChar = char
+            records[2 * i + 1].Event.KeyEvent.dwControlKeyState = 0
+        written = ctypes.wintypes.DWORD()
+        ok = _kernel32.WriteConsoleInputW(
+            conin, records, len(records), ctypes.byref(written)
+        )
+        _kernel32.CloseHandle(conin)
+        return bool(ok) and written.value > 0
+    finally:
+        _kernel32.FreeConsole()
+
+
+def _paste_to_console(hwnd, text):
+    """Paste text into a window that owns a console (OpenCode, cmd, etc.)."""
+    pid = ctypes.wintypes.DWORD()
+    try:
+        if not _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)):
+            return False
+        if not pid.value:
+            return False
+    except Exception:
+        return False
+    if not _write_console_input(pid.value, text):
+        return False
+    activate_window(hwnd)
+    return True
+
+
 def inject_text(text, hwnd=0):
     if not text:
+        return
+    if hwnd and _paste_to_console(hwnd, text):
         return
     original = None
     try:

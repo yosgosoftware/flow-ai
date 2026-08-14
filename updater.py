@@ -8,7 +8,7 @@ import urllib.request
 
 import config as config_mod
 
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 REPO = "yosgosoftware/flow-ai"
 RELEASE_URL = "https://github.com/%s/releases/latest" % REPO
 API_URL = "https://api.github.com/repos/%s/releases/latest" % REPO
