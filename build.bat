@@ -18,12 +18,13 @@ echo [4/4] Building single-file executable with PyInstaller...
 python -m PyInstaller --noconfirm --clean FlowAI.spec
 if errorlevel 1 goto :error
 
-echo [5/5] Creating desktop shortcut...
+echo [5/5] Installing to %APPDATA%\FlowAI and creating desktop shortcut...
 python create_shortcut.py
 if errorlevel 1 goto :error
 
 echo.
 echo Build complete: %~dp0dist\FlowAI.exe
+echo Installed to: %APPDATA%\FlowAI\FlowAI.exe (stable, unblocked)
 echo A desktop shortcut "FlowAI" has been created.
 echo.
 echo Equivalent direct command:

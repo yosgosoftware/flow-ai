@@ -140,6 +140,7 @@ WS_CAPTION = 0x00C00000
 SM_CXSCREEN = 0
 SM_CYSCREEN = 1
 HOTKEY_ID = 0x5A5A
+PM_NOREMOVE = 0
 
 SW_SHOW = 5
 SW_RESTORE = 9
@@ -303,6 +304,25 @@ _user32.SendInput.argtypes = [
 _user32.SendInput.restype = ctypes.wintypes.UINT
 _kernel32.GetCurrentThreadId.argtypes = []
 _kernel32.GetCurrentThreadId.restype = ctypes.wintypes.DWORD
+_kernel32.GetModuleHandleW.argtypes = [ctypes.wintypes.LPCWSTR]
+_kernel32.GetModuleHandleW.restype = ctypes.wintypes.HMODULE
+_user32.GetMessageW.argtypes = [
+    ctypes.POINTER(MSG),
+    ctypes.wintypes.HWND,
+    ctypes.wintypes.UINT,
+    ctypes.wintypes.UINT,
+]
+_user32.GetMessageW.restype = ctypes.wintypes.BOOL
+_user32.PeekMessageW.argtypes = [
+    ctypes.POINTER(MSG),
+    ctypes.wintypes.HWND,
+    ctypes.wintypes.UINT,
+    ctypes.wintypes.UINT,
+    ctypes.wintypes.UINT,
+]
+_user32.PeekMessageW.restype = ctypes.wintypes.BOOL
+_user32.DispatchMessageW.argtypes = [ctypes.POINTER(MSG)]
+_user32.DispatchMessageW.restype = ctypes.wintypes.LPARAM
 
 # Virtual-key code -> normalized name (the only keys FlowAI ever inspects).
 VK_TO_NAME = {
@@ -573,9 +593,13 @@ class Transcriber:
 
 
 class HotkeyManager:
-    # Hold-to-listen is detected with a lightweight polling thread that reads
-    # key state via GetAsyncKeyState. No keyboard hook is ever installed, so
-    # normal keystrokes are never intercepted, suppressed, or delayed.
+    # Hold-to-listen is driven by a global low-level keyboard hook
+    # (WH_KEYBOARD_LL) running on its own message-loop thread, so push-to-talk
+    # reacts instantly no matter which window is focused. The hook only
+    # observes keys - it never suppresses or delays normal keystrokes. A slow
+    # GetAsyncKeyState poller backs it up for windows the hook cannot see (a
+    # foreground app running at a higher integrity level, e.g. an elevated
+    # terminal), because that call reads the physical key state directly.
     POLL_INTERVAL = 0.02
 
     def __init__(self, config, audio, callbacks, is_app_focused, app=None):
@@ -598,6 +622,16 @@ class HotkeyManager:
         self._transcriber = Transcriber(config)
         self._combo_vks = frozenset(self._refresh_combo_vks())
         self._fullscreen_now = False
+        self._combo_event = threading.Event()
+        self._held_vks = set()
+        self._hook_combo_down = False
+        self._async_combo_down = False
+        self._hook_active = False
+        self._hook_thread = None
+        self._hook_thread_id = 0
+        self._hook_proc_ref = None
+        self._hook_ready = threading.Event()
+        self._async_poller = None
 
     # --- lifecycle -------------------------------------------------------
 
@@ -610,6 +644,20 @@ class HotkeyManager:
                 name="FlowAI-HotkeyWatch",
             )
             self._watcher.start()
+        if self._hook_thread is None:
+            self._hook_thread = threading.Thread(
+                target=self._hook_loop,
+                daemon=True,
+                name="FlowAI-HotkeyHook",
+            )
+            self._hook_thread.start()
+        if self._async_poller is None:
+            self._async_poller = threading.Thread(
+                target=self._async_poll_loop,
+                daemon=True,
+                name="FlowAI-HotkeyPoll",
+            )
+            self._async_poller.start()
         if self._tracker is None:
             self._tracker = threading.Thread(
                 target=self._track_foreground,
@@ -620,6 +668,13 @@ class HotkeyManager:
 
     def stop(self):
         self._running = False
+        if self._hook_thread is not None and self._hook_thread.is_alive():
+            self._hook_ready.wait(timeout=1.0)
+            try:
+                _user32.PostThreadMessageW(self._hook_thread_id, WM_QUIT, 0, 0)
+            except Exception:
+                pass
+            self._hook_thread = None
         if self._capture_hook is not None:
             try:
                 keyboard.unhook(self._capture_hook)
@@ -690,10 +745,14 @@ class HotkeyManager:
         return self._combo_vks
 
     def _watch_loop(self):
-        was_down = self._combo_down()
+        with self._lock:
+            was_down = self._hook_combo_down or self._async_combo_down
         while self._running:
+            self._combo_event.wait(timeout=0.15)
+            self._combo_event.clear()
             try:
-                down = self._combo_down()
+                with self._lock:
+                    down = self._hook_combo_down or self._async_combo_down
                 if self._state == "idle":
                     if down and not was_down:
                         active = (
@@ -718,6 +777,85 @@ class HotkeyManager:
                 was_down = down
             except Exception:
                 pass
+
+    # --- global low-level keyboard hook ----------------------------------
+
+    def _hook_loop(self):
+        """Install a global WH_KEYBOARD_LL hook and pump its message loop.
+
+        The hook only *observes* keys for the push-to-talk combo; the callback
+        always chains to CallNextHookEx, so every keystroke still reaches the
+        foreground application unchanged and nothing is ever blocked or delayed.
+        """
+        proc = LOWLEVEL_KEYBOARD_PROC(self._hook_callback)
+        with self._lock:
+            self._hook_proc_ref = proc
+        hook = _user32.SetWindowsHookExW(
+            WH_KEYBOARD_LL, proc, _kernel32.GetModuleHandleW(None), 0
+        )
+        if not hook:
+            with self._lock:
+                self._hook_active = False
+                self._hook_proc_ref = None
+            return
+        with self._lock:
+            self._hook_active = True
+            self._hook_thread_id = _kernel32.GetCurrentThreadId()
+        self._hook_ready.set()
+        msg = MSG()
+        try:
+            while _user32.GetMessageW(ctypes.byref(msg), 0, 0, 0) > 0:
+                _user32.DispatchMessageW(ctypes.byref(msg))
+        finally:
+            _user32.UnhookWindowsHookEx(hook)
+            with self._lock:
+                self._hook_active = False
+                self._hook_proc_ref = None
+
+    def _hook_callback(self, n_code, w_param, l_param):
+        if n_code == HC_ACTION:
+            try:
+                info = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                down = w_param in (WM_KEYDOWN, WM_SYSKEYDOWN)
+                with self._lock:
+                    if down:
+                        self._held_vks.add(info.vkCode)
+                    else:
+                        self._held_vks.discard(info.vkCode)
+                    held = self._combo_held_locked()
+                    if held != self._hook_combo_down:
+                        self._hook_combo_down = held
+                        self._combo_event.set()
+            except Exception:
+                pass
+        return _user32.CallNextHookEx(0, n_code, w_param, l_param)
+
+    def _combo_held_locked(self):
+        for key in self.config.hotkey:
+            if not any(vk in self._held_vks for vk in name_to_vks(key)):
+                return False
+        return True
+
+    def _async_poll_loop(self):
+        """GetAsyncKeyState fallback for windows a low-level hook cannot see.
+
+        WH_KEYBOARD_LL does not receive input bound for a foreground window
+        running at a higher integrity level (e.g. an elevated terminal hosting
+        OpenCode or VS Code). GetAsyncKeyState reads the physical key state
+        directly and is not subject to that isolation, so this fallback keeps
+        push-to-talk working in that case too.
+        """
+        msg = MSG()
+        _user32.PeekMessageW(ctypes.byref(msg), 0, 0, 0, PM_NOREMOVE)
+        while self._running:
+            try:
+                down = self._combo_down()
+            except Exception:
+                down = False
+            with self._lock:
+                if down != self._async_combo_down:
+                    self._async_combo_down = down
+                    self._combo_event.set()
             time.sleep(self.POLL_INTERVAL)
 
     # --- full-screen / game detection ------------------------------------

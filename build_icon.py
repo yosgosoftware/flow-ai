@@ -1,7 +1,7 @@
 import os
 import sys
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import (QBrush, QColor, QLinearGradient, QPainter, QPen,
                          QPixmap)
 from PyQt6.QtWidgets import QApplication
@@ -18,13 +18,13 @@ def app_icon_pixmap(size=256):
     gradient.setColorAt(1.0, QColor("#0E0E12"))
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(QBrush(gradient))
-    painter.drawRoundedRect(0.0, 0.0, s, s, s * 0.22, s * 0.22)
+    painter.drawRoundedRect(QRectF(0.0, 0.0, s, s), s * 0.22, s * 0.22)
     pen = QPen(QColor("#FFFFFF"), max(1.0, s * 0.055))
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     painter.setPen(pen)
     painter.setBrush(Qt.BrushStyle.NoBrush)
-    painter.drawRoundedRect(s * 0.38, s * 0.13, s * 0.24, s * 0.48, s * 0.09, s * 0.09)
+    painter.drawRoundedRect(QRectF(s * 0.38, s * 0.13, s * 0.24, s * 0.48), s * 0.09, s * 0.09)
     painter.drawLine(int(s * 0.5), int(s * 0.61), int(s * 0.5), int(s * 0.79))
     painter.drawLine(int(s * 0.30), int(s * 0.79), int(s * 0.70), int(s * 0.79))
     painter.drawArc(int(s * 0.30), int(s * 0.30), int(s * 0.40), int(s * 0.40), 180 * 16, 180 * 16)

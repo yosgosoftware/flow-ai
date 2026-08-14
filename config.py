@@ -1,5 +1,7 @@
 import json
 import os
+import shutil
+import subprocess
 import sys
 import winreg
 
@@ -31,18 +33,82 @@ def config_path():
     return os.path.join(config_dir(), "config.json")
 
 
+def installed_exe():
+    """Stable per-user install location for the packaged executable."""
+    return os.path.join(config_dir(), APP_NAME + ".exe")
+
+
+def _zone_id_stream(path):
+    return path + ":Zone.Identifier"
+
+
+def has_mark_of_web(path):
+    try:
+        return os.path.exists(_zone_id_stream(path))
+    except (OSError, ValueError):
+        return False
+
+
+def unblock_file(path):
+    """Strip the Windows Mark-of-the-Web (Zone.Identifier ADS) from a file."""
+    try:
+        escaped = path.replace("'", "''")
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "Unblock-File -LiteralPath '%s'" % escaped],
+            capture_output=True,
+            timeout=60,
+        )
+    except Exception:
+        pass
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "Remove-Item -LiteralPath '%s' -Stream Zone.Identifier -Force -ErrorAction SilentlyContinue" % path.replace("'", "''")],
+            capture_output=True,
+            timeout=60,
+        )
+    except Exception:
+        pass
+    return not has_mark_of_web(path)
+
+
+def ensure_installed():
+    """Copy the running executable into the stable install dir (unblocked).
+
+    Returns the installed exe path, or the source path if copying failed.
+    Returns None when running from source (not packaged).
+    """
+    if not getattr(sys, "frozen", False):
+        return None
+    target = installed_exe()
+    source = os.path.abspath(sys.executable)
+    if source.lower() == os.path.abspath(target).lower():
+        return target
+    try:
+        os.makedirs(config_dir(), exist_ok=True)
+        shutil.copy2(source, target)
+        unblock_file(target)
+    except OSError:
+        return source
+    return target
+
+
 def set_autostart(enabled):
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE)
     except OSError:
         return False
     try:
-        exe = sys.executable
-        if getattr(sys, "frozen", False):
-            command = '"%s"' % exe
-        else:
-            command = '"%s" "%s"' % (exe, os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py"))
         if enabled:
+            if getattr(sys, "frozen", False):
+                exe = ensure_installed()
+                if not exe:
+                    raise OSError("no executable")
+                command = '"%s"' % exe
+            else:
+                script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
+                command = '"%s" "%s"' % (sys.executable, script)
             winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, command)
         else:
             try:

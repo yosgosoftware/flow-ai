@@ -6,7 +6,9 @@ import sys
 import tempfile
 import urllib.request
 
-APP_VERSION = "1.0.4"
+import config as config_mod
+
+APP_VERSION = "1.0.5"
 REPO = "yosgosoftware/flow-ai"
 RELEASE_URL = "https://github.com/%s/releases/latest" % REPO
 API_URL = "https://api.github.com/repos/%s/releases/latest" % REPO
@@ -121,6 +123,7 @@ def download_exe(url, dest_dir, cancel=None):
         _try_remove(partial)
         raise UpdateError("Download failed: file is not a valid installer.")
     os.replace(partial, destination)
+    config_mod.unblock_file(destination)
     return destination
 
 
@@ -143,15 +146,17 @@ def _write_updater_script():
         ":replace\r\n"
         "set /a tries=0\r\n"
         ":copy_loop\r\n"
-        "copy /y %~f1 %~f2 >nul 2>&1\r\n"
-        "if not errorlevel 1 goto :done\r\n"
+        "copy /y \"%~f1\" \"%~f2\" >nul 2>&1\r\n"
+        "if not errorlevel 1 goto :unblock\r\n"
         "set /a tries+=1\r\n"
         "if %tries% GEQ 15 goto :failed\r\n"
         "timeout /t 1 /nobreak >nul\r\n"
         "goto :copy_loop\r\n"
+        ":unblock\r\n"
+        "powershell -NoProfile -NonInteractive -Command \"Unblock-File -LiteralPath '%~f2'\" >nul 2>&1\r\n"
         ":done\r\n"
-        "start \"\" %~f2\r\n"
-        "del /q %~f1 >nul 2>&1\r\n"
+        "start \"\" \"%~f2\"\r\n"
+        "del /q \"%~f1\" >nul 2>&1\r\n"
         "exit /b 0\r\n"
         ":failed\r\n"
         "del /q %~f1 >nul 2>&1\r\n"

@@ -1736,6 +1736,8 @@ class FlowAIApplication:
         self.tray.show()
         self.config.save()
         current_autostart = config_mod.autostart_enabled()
+        if current_autostart:
+            config_mod.set_autostart(True)
         if current_autostart != self.config.autostart:
             self.config.autostart = current_autostart
         self.window.set_service_toggle(True)
@@ -2193,7 +2195,40 @@ def single_instance(key):
     return True, memory
 
 
+def _migrate_to_stable_path():
+    """If the packaged app is running from an unstable location (Downloads,
+    temp, or a Mark-of-the-Web-flagged copy), move it to the stable install
+    dir and relaunch from there. Returns True when the caller should exit.
+    """
+    if not getattr(sys, "frozen", False):
+        return False
+    installed = config_mod.installed_exe()
+    running = os.path.abspath(sys.executable)
+    if running.lower() == os.path.abspath(installed).lower():
+        return False
+
+    home = (os.path.expanduser("~") or "").lower()
+    running_lower = running.lower()
+    temp_root = (os.path.normpath(tempfile.gettempdir()) or "").lower()
+    unstable = (
+        config_mod.has_mark_of_web(running)
+        or running_lower.startswith(os.path.join(home, "downloads"))
+        or running_lower.startswith(temp_root)
+    )
+    if not unstable:
+        return False
+
+    target = config_mod.ensure_installed()
+    if not target or os.path.abspath(target).lower() == running_lower:
+        return False
+    subprocess.Popen([target])
+    return True
+
+
 def main():
+    if _migrate_to_stable_path():
+        return 0
+
     app = QApplication(sys.argv)
     app.setApplicationName("FlowAI")
     app.setOrganizationName("FlowAI")

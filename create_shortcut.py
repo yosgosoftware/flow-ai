@@ -1,6 +1,9 @@
 import os
+import shutil
 import subprocess
 import sys
+
+import config as config_mod
 
 
 def desktop_path():
@@ -45,9 +48,20 @@ def main():
     if not os.path.exists(exe):
         raise SystemExit("FlowAI.exe not found. Run the PyInstaller build first.")
 
+    target = config_mod.installed_exe()
+    if os.path.abspath(exe).lower() != os.path.abspath(target).lower():
+        try:
+            os.makedirs(config_mod.config_dir(), exist_ok=True)
+            shutil.copy2(exe, target)
+        except OSError as exc:
+            raise SystemExit("Could not install FlowAI: %s" % exc)
+    config_mod.unblock_file(target)
+    config_mod.unblock_file(exe)
+
     shortcut = os.path.join(desktop_path(), "FlowAI.lnk")
     icon = os.path.join(root, "assets", "app.ico")
-    create_shortcut(exe, shortcut, icon)
+    create_shortcut(target, shortcut, icon)
+    print("Installed FlowAI: %s" % target)
     print("Created desktop shortcut: %s" % shortcut)
 
 
