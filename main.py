@@ -2242,27 +2242,29 @@ class FlowAIApplication:
         if self._quitting:
             return
         self._quitting = True
-        force_exit = threading.Timer(1.0, lambda: os._exit(0))
-        force_exit.daemon = True
-        force_exit.start()
-        try:
-            for cleanup in (
+
+        def run_cleanup():
+            for fn in (
                 self.manager.cancel_capture,
                 self.manager.stop,
                 self.audio.close,
                 self.tray.hide,
             ):
                 try:
-                    cleanup()
-                except Exception as exc:
-                    print(f"quit_app: {getattr(cleanup, '__name__', cleanup)} failed: {exc}")
+                    fn()
+                except Exception:
+                    pass
             try:
                 import keyboard
                 keyboard.unhook_all()
             except Exception:
                 pass
-        finally:
+
+        threading.Thread(target=run_cleanup, daemon=True).start()
+        try:
             self.app.quit()
+        finally:
+            os._exit(0)
 
 
 SINGLE_INSTANCE_KEY = "FlowAI_SingleInstance_7f3a9c"
