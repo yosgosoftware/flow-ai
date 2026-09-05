@@ -8,7 +8,7 @@ import threading
 import traceback
 import webbrowser
 
-from PyQt6.QtCore import QObject, QSharedMemory, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QSharedMemory, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (QBrush, QColor, QFont, QIcon, QLinearGradient,
                          QPainter, QPen, QPixmap, QPolygonF)
 from PyQt6.QtCore import QPointF, QRectF
@@ -1450,6 +1450,7 @@ class ModelTab(QWidget):
 class TitleBar(QWidget):
     close_requested = pyqtSignal()
     minimize_requested = pyqtSignal()
+    maximize_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1478,20 +1479,35 @@ class TitleBar(QWidget):
         minimize_btn.setObjectName("WindowBtn")
         minimize_btn.setText("\u2014")
         minimize_btn.setFixedSize(34, 26)
-        minimize_btn.setToolTip("Minimize to tray")
+        minimize_btn.setToolTip("Minimize")
         minimize_btn.clicked.connect(self._on_minimize)
         layout.addWidget(minimize_btn)
+
+        self.maximize_btn = QToolButton()
+        self.maximize_btn.setObjectName("WindowBtn")
+        self.maximize_btn.setText("\u25a1")
+        self.maximize_btn.setFixedSize(34, 26)
+        self.maximize_btn.setToolTip("Maximize")
+        self.maximize_btn.clicked.connect(self._on_maximize)
+        layout.addWidget(self.maximize_btn)
 
         close_btn = QToolButton()
         close_btn.setObjectName("CloseBtn")
         close_btn.setText("\u2715")
         close_btn.setFixedSize(34, 26)
-        close_btn.setToolTip("Close to tray")
+        close_btn.setToolTip("Close")
         close_btn.clicked.connect(self.close_requested)
         layout.addWidget(close_btn)
 
     def _on_minimize(self):
         self.minimize_requested.emit()
+
+    def _on_maximize(self):
+        self.maximize_requested.emit()
+
+    def set_maximized(self, maximized):
+        self.maximize_btn.setText("\u2750" if maximized else "\u25a1")
+        self.maximize_btn.setToolTip("Restore" if maximized else "Maximize")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1511,6 +1527,7 @@ class TitleBar(QWidget):
 class MainWindow(QWidget):
     close_requested = pyqtSignal()
     minimize_requested = pyqtSignal()
+    maximize_requested = pyqtSignal()
 
     def __init__(self, config, engine, parent=None):
         super().__init__(parent)
@@ -1541,6 +1558,7 @@ class MainWindow(QWidget):
         self.title_bar = TitleBar()
         self.title_bar.close_requested.connect(self.close_requested)
         self.title_bar.minimize_requested.connect(self.minimize_requested)
+        self.title_bar.maximize_requested.connect(self.maximize_requested)
         card_layout.addWidget(self.title_bar)
 
         body = QHBoxLayout()
@@ -1561,6 +1579,15 @@ class MainWindow(QWidget):
             self._stack.addWidget(page)
         body.addWidget(self._stack, 1)
         card_layout.addLayout(body, 1)
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.WindowStateChange:
+            self.title_bar.set_maximized(self.isMaximized())
+        super().changeEvent(event)
+
+    def closeEvent(self, event):
+        self.close_requested.emit()
+        event.ignore()
 
     def _build_sidebar(self):
         sidebar = QFrame()
@@ -1689,7 +1716,6 @@ class FlowAIApplication:
         self.app = app
         self.memory = memory
         self._quitting = False
-        self._tray_notified = False
         self._ipc_server = None
         self._app_hwnd = 0
         self._update_checking = False
@@ -1830,8 +1856,9 @@ class FlowAIApplication:
         self.signals.hotkey_captured.connect(self._on_hotkey_captured)
         self.signals.capture_state_changed.connect(self.window.set_capture_state)
 
-        self.window.close_requested.connect(self._hide_to_tray)
-        self.window.minimize_requested.connect(self._hide_to_tray)
+        self.window.close_requested.connect(self.quit_app)
+        self.window.minimize_requested.connect(self._minimize_window)
+        self.window.maximize_requested.connect(self._toggle_maximize)
         self.window.dashboard.toggle_changed.connect(self.set_service)
         self.window.dashboard.check_updates_requested.connect(
             lambda: self._check_for_updates(True)
@@ -2143,16 +2170,14 @@ class FlowAIApplication:
         window.raise_()
         window.activateWindow()
 
-    def _hide_to_tray(self):
-        self.window.hide()
-        if not self._tray_notified:
-            self.tray.showMessage(
-                "FlowAI",
-                "FlowAI is still running in the system tray.",
-                QSystemTrayIcon.MessageIcon.Information,
-                3000,
-            )
-            self._tray_notified = True
+    def _minimize_window(self):
+        self.window.showMinimized()
+
+    def _toggle_maximize(self):
+        if self.window.isMaximized():
+            self.window.showNormal()
+        else:
+            self.window.showMaximized()
 
     def _is_app_focused(self):
         try:
