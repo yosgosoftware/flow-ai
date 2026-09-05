@@ -1817,7 +1817,6 @@ class FlowAIApplication:
         QTimer.singleShot(300, self._open_window)
         QTimer.singleShot(10000, lambda: self._check_for_updates(False))
         self._start_ipc_server()
-        self.app.aboutToQuit.connect(self.quit_app)
 
     def _start_ipc_server(self):
         try:
@@ -2247,6 +2246,9 @@ class FlowAIApplication:
             keyboard.unhook_all()
         except Exception:
             pass
+        force_exit = threading.Timer(2.0, lambda: os._exit(0))
+        force_exit.daemon = True
+        force_exit.start()
         self.app.quit()
 
 
