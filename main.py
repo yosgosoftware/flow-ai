@@ -11,7 +11,7 @@ import webbrowser
 from PyQt6.QtCore import QEvent, QObject, QSharedMemory, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (QBrush, QColor, QFont, QIcon, QLinearGradient,
                          QPainter, QPen, QPixmap, QPolygonF)
-from PyQt6.QtCore import QPointF, QRectF
+from PyQt6.QtCore import QPoint, QPointF, QRectF
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
                              QDialog, QFrame, QGraphicsDropShadowEffect, QHBoxLayout,
@@ -1471,6 +1471,7 @@ class TitleBar(QWidget):
         self.setObjectName("TitleBar")
         self.setFixedHeight(52)
         self._drag_offset = None
+        self._drag_from_maximized = False
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(18, 0, 12, 0)
@@ -1525,16 +1526,27 @@ class TitleBar(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_offset = event.globalPosition().toPoint() - self.window().frameGeometry().topLeft()
+            window = self.window()
+            self._drag_offset = event.globalPosition().toPoint() - window.frameGeometry().topLeft()
+            self._drag_from_maximized = window.isMaximized()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
-            self.window().move(event.globalPosition().toPoint() - self._drag_offset)
+            window = self.window()
+            if self._drag_from_maximized:
+                window.showNormal()
+                cursor = event.globalPosition().toPoint()
+                ratio = (cursor.x() - window.frameGeometry().x()) / max(1, window.width())
+                ratio = min(1.0, max(0.0, ratio))
+                self._drag_offset = QPoint(int(window.width() * ratio), cursor.y() - window.y())
+                self._drag_from_maximized = False
+            window.move(event.globalPosition().toPoint() - self._drag_offset)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         self._drag_offset = None
+        self._drag_from_maximized = False
         super().mouseReleaseEvent(event)
 
 
