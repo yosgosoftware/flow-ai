@@ -2220,11 +2220,10 @@ class FlowAIApplication:
         window.activateWindow()
 
     def _minimize_window(self):
-        if sys.platform == "win32":
+        self.window.showMinimized()
+        if not self.window.isMinimized() and sys.platform == "win32":
             hwnd = int(self.window.winId())
             ctypes.windll.user32.ShowWindow(hwnd, 6)
-        else:
-            self.window.showMinimized()
 
     def _toggle_maximize(self):
         if self.window.isMaximized():
