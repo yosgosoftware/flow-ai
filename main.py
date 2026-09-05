@@ -1531,7 +1531,12 @@ class MainWindow(QWidget):
 
     def __init__(self, config, engine, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Window
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+        )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMinimumSize(920, 620)
         self.resize(1000, 660)
@@ -2171,7 +2176,11 @@ class FlowAIApplication:
         window.activateWindow()
 
     def _minimize_window(self):
-        self.window.showMinimized()
+        if sys.platform == "win32":
+            hwnd = int(self.window.winId())
+            ctypes.windll.user32.ShowWindow(hwnd, 6)
+        else:
+            self.window.showMinimized()
 
     def _toggle_maximize(self):
         if self.window.isMaximized():
