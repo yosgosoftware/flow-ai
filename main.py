@@ -97,6 +97,20 @@ QWidget {
     border-radius: 14px;
 }
 
+#WindowCard[winMaximized="true"] {
+    border-radius: 0px;
+}
+
+#Sidebar[winMaximized="true"] {
+    border-top-left-radius: 0px;
+    border-bottom-left-radius: 0px;
+}
+
+#ContentPane[winMaximized="true"] {
+    border-top-right-radius: 0px;
+    border-bottom-right-radius: 0px;
+}
+
 #TitleBar {
     background: transparent;
 }
@@ -1543,18 +1557,20 @@ class MainWindow(QWidget):
         self._build(config, engine)
 
     def _build(self, config, engine):
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 16, 16, 16)
-        outer.setSpacing(0)
+        self._outer = QVBoxLayout(self)
+        self._outer.setContentsMargins(16, 16, 16, 16)
+        self._outer.setSpacing(0)
 
         self._card = QFrame()
         self._card.setObjectName("WindowCard")
+        self._card.setProperty("winMaximized", False)
         shadow = QGraphicsDropShadowEffect(self._card)
         shadow.setBlurRadius(48)
         shadow.setOffset(0, 8)
         shadow.setColor(QColor(0, 0, 0, 150))
+        self._shadow = shadow
         self._card.setGraphicsEffect(shadow)
-        outer.addWidget(self._card)
+        self._outer.addWidget(self._card)
 
         card_layout = QVBoxLayout(self._card)
         card_layout.setContentsMargins(0, 0, 0, 0)
@@ -1570,8 +1586,8 @@ class MainWindow(QWidget):
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
 
-        sidebar = self._build_sidebar()
-        body.addWidget(sidebar)
+        self._sidebar = self._build_sidebar()
+        body.addWidget(self._sidebar)
 
         self._stack = QStackedWidget()
         self._stack.setObjectName("ContentPane")
@@ -1588,7 +1604,24 @@ class MainWindow(QWidget):
     def changeEvent(self, event):
         if event.type() == QEvent.Type.WindowStateChange:
             self.title_bar.set_maximized(self.isMaximized())
+            self._apply_maximized_state(self.isMaximized())
         super().changeEvent(event)
+
+    def _apply_maximized_state(self, maximized):
+        self._outer.setContentsMargins(0, 0, 0, 0) if maximized else self._outer.setContentsMargins(16, 16, 16, 16)
+        if maximized:
+            self._card.setGraphicsEffect(None)
+        elif not self._card.graphicsEffect():
+            shadow = QGraphicsDropShadowEffect(self._card)
+            shadow.setBlurRadius(48)
+            shadow.setOffset(0, 8)
+            shadow.setColor(QColor(0, 0, 0, 150))
+            self._shadow = shadow
+            self._card.setGraphicsEffect(shadow)
+        for widget in (self._card, self._sidebar, self._stack):
+            widget.setProperty("winMaximized", maximized)
+            self.style().unpolish(widget)
+            self.style().polish(widget)
 
     def closeEvent(self, event):
         self.close_requested.emit()
